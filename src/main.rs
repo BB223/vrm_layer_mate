@@ -1,13 +1,34 @@
-use glium::Frame;
+use std::time::Duration;
+
+use glium::backend::Facade;
+use glium::{Program, program};
 use gtk::gdk::Display;
-use gtk::{glib, Application, ApplicationWindow, GLArea};
+use gtk::{Application, ApplicationWindow, glib};
 use gtk::{CssProvider, prelude::*};
-use gtk4_glium::GtkFacade;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use vrm_layer_mate::glium_gl_area::GliumGLArea;
 
 const APP_ID: &str = "org.gtk_rs.HelloWorld1";
 
 fn main() -> glib::ExitCode {
+     // Load GL pointers from epoxy (GL context management library used by GTK).
+    {
+        #[cfg(target_os = "macos")]
+        let library = unsafe { libloading::os::unix::Library::new("libepoxy.0.dylib") }.unwrap();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let library = unsafe { libloading::os::unix::Library::new("libepoxy.so.0") }.unwrap();
+        #[cfg(windows)]
+        let library = libloading::os::windows::Library::open_already_loaded("libepoxy-0.dll")
+            .or_else(|_| libloading::os::windows::Library::open_already_loaded("epoxy-0.dll"))
+            .unwrap();
+
+        epoxy::load_with(|name| {
+            unsafe { library.get::<_>(name.as_bytes()) }
+                .map(|symbol| *symbol)
+                .unwrap_or(std::ptr::null())
+        });
+    }
+
     let app = Application::builder().application_id(APP_ID).build();
 
     app.connect_startup(|_| load_css());
@@ -27,12 +48,7 @@ fn load_css() {
 }
 
 fn build_ui(app: &Application) {
-    let glarea = GLArea::builder().vexpand(true).build();
-    let facade = GtkFacade::from_glarea(&glarea).unwrap();
-    glarea.connect_render(move |glarea, ctx| {
-        let context = facade.get_context();
-        glib::Propagation::Stop
-    });
+    let glarea = GliumGLArea::default();
     // Create a window and set the title
     let window = ApplicationWindow::builder()
         .application(app)
@@ -58,4 +74,41 @@ fn build_ui(app: &Application) {
     window.set_decorated(false);
 
     window.present();
+
+    let frame_time = Duration::new(0, 1_000_000_000 / 60);
+    glib::source::timeout_add_local(frame_time, move || {
+        glarea.queue_draw();
+        glib::ControlFlow::Continue
+    });
+}
+
+fn create_program<F>(display: &F) -> Program
+where
+    F: Facade,
+{
+    program!(display,
+                320 es => {
+            vertex: "
+                #version 320 es
+                uniform mat4 matrix;
+                in vec2 position;
+                in vec3 color;
+                out vec3 vColor;
+                void main() {
+                    gl_Position = vec4(position, 0.0, 1.0) * matrix;
+                    vColor = color;
+                }
+            ",
+            fragment: "
+                #version 320 es
+                precision mediump float;
+                in vec3 vColor;
+                out vec4 f_color;
+                void main() {
+                    f_color = vec4(vColor, 1.0);
+                }
+            "
+        }
+    )
+    .unwrap()
 }
