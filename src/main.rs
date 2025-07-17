@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use glium::backend::Facade;
-use glium::{Program, program};
 use gtk::gdk::Display;
 use gtk::{Application, ApplicationWindow, glib};
 use gtk::{CssProvider, prelude::*};
@@ -49,6 +47,7 @@ fn load_css() {
 
 fn build_ui(app: &Application) {
     let glarea = GliumGLArea::default();
+    glarea.set_has_depth_buffer(true);
     // Create a window and set the title
     let window = ApplicationWindow::builder()
         .application(app)
@@ -75,40 +74,9 @@ fn build_ui(app: &Application) {
 
     window.present();
 
-    let frame_time = Duration::new(0, 1_000_000_000 / 60);
+    let frame_time = Duration::new(0, 1_000_000_000 / 2);
     glib::source::timeout_add_local(frame_time, move || {
         glarea.queue_draw();
         glib::ControlFlow::Continue
     });
-}
-
-fn create_program<F>(display: &F) -> Program
-where
-    F: Facade,
-{
-    program!(display,
-                320 es => {
-            vertex: "
-                #version 320 es
-                uniform mat4 matrix;
-                in vec2 position;
-                in vec3 color;
-                out vec3 vColor;
-                void main() {
-                    gl_Position = vec4(position, 0.0, 1.0) * matrix;
-                    vColor = color;
-                }
-            ",
-            fragment: "
-                #version 320 es
-                precision mediump float;
-                in vec3 vColor;
-                out vec4 f_color;
-                void main() {
-                    f_color = vec4(vColor, 1.0);
-                }
-            "
-        }
-    )
-    .unwrap()
 }
