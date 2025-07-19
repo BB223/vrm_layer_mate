@@ -2,7 +2,7 @@ pub mod glium_gl_area {
     use gtk::{gdk, glib, prelude::*};
 
     glib::wrapper! {
-        pub struct GliumGLArea(ObjectSubclass<imp::GliumGLArea>)
+        pub struct GliumGLArea(ObjectSubclass<imp::GliumGLAreaImp>)
             @extends gtk::GLArea, gtk::Widget,
             @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
     }
@@ -57,12 +57,14 @@ pub mod glium_gl_area {
             rc::Rc,
         };
 
-        use cgmath::SquareMatrix;
+        use cgmath::{InnerSpace, Matrix, SquareMatrix};
         use glium::{
-            IndexBuffer, Surface, VertexBuffer, program,
+            CapabilitiesSource, IndexBuffer, Surface, Texture2d, VertexBuffer,
+            backend::{Backend, Facade},
+            program,
             texture::{RawImage2d, SrgbTexture2d},
         };
-        use gtk::{gdk, glib, prelude::*, subclass::prelude::*};
+        use gtk::{GLArea, gdk, glib, prelude::*, subclass::prelude::*};
 
         struct VrmModel {
             context: Rc<glium::backend::Context>,
@@ -72,24 +74,25 @@ pub mod glium_gl_area {
 
         #[derive(Copy, Clone)]
         struct Vertex {
-            a_position: [f32; 3],
-            a_uv: [f32; 2],
+            position: [f32; 3],
+            normal: [f32; 3],
+            tex_coord: [f32; 2],
         }
 
         struct MeshInstance {
             vertex_buffer: VertexBuffer<Vertex>,
             index_buffer: IndexBuffer<u32>,
-            texture: SrgbTexture2d,
+            image_data: gltf::image::Data,
         }
 
-        glium::implement_vertex!(Vertex, a_position, a_uv);
+        glium::implement_vertex!(Vertex, position, normal, tex_coord);
 
         impl VrmModel {
             fn new(context: Rc<glium::backend::Context>) -> Self {
                 let program = glium::program!(&context,
                     320 es => {
-                        vertex: include_str!("unlit.vert.glsl"),
-                        fragment: include_str!("unlit.frag.glsl")
+                        vertex: include_str!("shaders/simple.vert.glsl"),
+                        fragment: include_str!("shaders/mtoon.frag.glsl")
                     },
                 )
                 .unwrap();
@@ -101,8 +104,7 @@ pub mod glium_gl_area {
                 }
             }
             fn load_model(context: &Rc<glium::backend::Context>) -> Vec<MeshInstance> {
-                let (doc, buffers, images) =
-                    gltf::import("/home/bzell/personal/vrm_layer_mate/Corset.glb").expect("file");
+                let (doc, buffers, images) = gltf::import("models/girl.glb").unwrap();
                 let mut meshes = Vec::new();
 
                 for mesh in doc.meshes() {
@@ -112,7 +114,7 @@ pub mod glium_gl_area {
                         // Extract vertex data
                         let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().collect();
                         let tex_coords = reader.read_tex_coords(0).unwrap().into_f32();
-                        // let normals: Vec<[f32; 3]> = reader.read_normals().unwrap().collect();
+                        let normals: Vec<[f32; 3]> = reader.read_normals().unwrap().collect();
                         // let colors: Vec<[f32; 4]> = reader
                         //     .read_colors(0)
                         //     .map(|c| match c {
@@ -123,11 +125,11 @@ pub mod glium_gl_area {
                         let vertices: Vec<Vertex> = positions
                             .into_iter()
                             .zip(tex_coords)
-                            // .zip(normals)
-                            // .zip(colors)
-                            .map(|(pos, uv)| Vertex {
-                                a_position: pos,
-                                a_uv: uv,
+                            .zip(normals)
+                            .map(|((pos, uv), normal)| Vertex {
+                                position: pos,
+                                tex_coord: uv,
+                                normal: normal,
                             })
                             .collect();
                         let indices: Vec<u32> = reader.read_indices().unwrap().into_u32().collect();
@@ -139,30 +141,11 @@ pub mod glium_gl_area {
                         )
                         .unwrap();
 
-                        let base_color_texture = primitive
-                            .material()
-                            .pbr_metallic_roughness()
-                            .base_color_texture()
-                            .unwrap();
-                        let image_index = base_color_texture.texture().source().index();
-                        let image_data = &images[image_index];
-                        let dims = (image_data.width, image_data.height);
-                        // If not RGBA, convert to RGBA (just to be safe)
-                        let rgba_pixels = match image_data.format {
-                            gltf::image::Format::R8G8B8A8 => image_data.pixels.clone(),
-                            gltf::image::Format::R8G8B8 => {
-                                // Expand RGB to RGBA
-                                image_data
-                                    .pixels
-                                    .chunks(3)
-                                    .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255]) // Add alpha = 255
-                                    .collect()
-                            }
-                            _ => panic!("Unsupported pixel format: {:?}", image_data.format),
-                        };
-                        let raw_image = RawImage2d::from_raw_rgba_reversed(&rgba_pixels, dims);
-                        let texture =
-                            glium::texture::SrgbTexture2d::new(context, raw_image).unwrap();
+                        let material = primitive.material();
+                        let pbr = material.pbr_metallic_roughness();
+                        let base_color_texture = pbr.base_color_texture().unwrap();
+                        let image_index = base_color_texture.texture().index();
+                        let image_data = images.get(image_index).unwrap().clone();
 
                         println!(
                             "Loaded {} indices, {} vertices",
@@ -172,11 +155,10 @@ pub mod glium_gl_area {
                         meshes.push(MeshInstance {
                             vertex_buffer,
                             index_buffer,
-                            texture,
+                            image_data,
                         });
                     }
                 }
-
                 meshes
             }
             fn draw(&self) {
@@ -184,113 +166,59 @@ pub mod glium_gl_area {
                     self.context.clone(),
                     self.context.get_framebuffer_dimensions(),
                 );
-                frame.clear_color_and_depth((0.0, 0.0, 0.0, 0.01), 1.0);
+                frame.clear_color(0.0, 0.0, 0.0, 0.0);
 
-                // let (doc, buffers, images) =
-                //     gltf::import("/home/bzell/personal/vrm_layer_mate/Corset.glb").expect("file");
-                // let mut meshes = Vec::new();
-
-                // for mesh in doc.meshes() {
-                //     for primitive in mesh.primitives() {
-                //         let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-
-                //         // Extract vertex data
-                //         let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().collect();
-                //         let tex_coords = reader.read_tex_coords(0).unwrap().into_f32();
-                //         // let normals: Vec<[f32; 3]> = reader.read_normals().unwrap().collect();
-                //         // let colors: Vec<[f32; 4]> = reader
-                //         //     .read_colors(0)
-                //         //     .map(|c| match c {
-                //         //         gltf::mesh::util::ReadColors::RgbaF32(iter) => iter.collect(),
-                //         //         _ => vec![[1.0, 1.0, 1.0, 1.0]; positions.len()],
-                //         //     })
-                //         //     .unwrap_or_else(|| vec![[1.0, 1.0, 1.0, 1.0]; positions.len()]);
-                //         let vertices: Vec<Vertex> = positions
-                //             .into_iter()
-                //             .zip(tex_coords)
-                //             // .zip(normals)
-                //             // .zip(colors)
-                //             .map(|(pos, uv)| Vertex {
-                //                 a_position: pos,
-                //                 a_uv: uv,
-                //             })
-                //             .collect();
-                //         let indices: Vec<u32> = reader.read_indices().unwrap().into_u32().collect();
-                //         let vertex_buffer =
-                //             glium::VertexBuffer::new(&self.context, &vertices).unwrap();
-                //         let index_buffer = glium::IndexBuffer::new(
-                //             &self.context,
-                //             glium::index::PrimitiveType::TrianglesList,
-                //             &indices,
-                //         )
-                //         .unwrap();
-
-                //         let base_color_texture = primitive
-                //             .material()
-                //             .pbr_metallic_roughness()
-                //             .base_color_texture()
-                //             .unwrap();
-                //         let image_index = base_color_texture.texture().source().index();
-                //         let image_data = &images[image_index];
-                //         let dims = (image_data.width, image_data.height);
-                //         // If not RGBA, convert to RGBA (just to be safe)
-                //         let rgba_pixels = match image_data.format {
-                //             gltf::image::Format::R8G8B8A8 => image_data.pixels.clone(),
-                //             gltf::image::Format::R8G8B8 => {
-                //                 // Expand RGB to RGBA
-                //                 image_data
-                //                     .pixels
-                //                     .chunks(3)
-                //                     .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255]) // Add alpha = 255
-                //                     .collect()
-                //             }
-                //             _ => panic!("Unsupported pixel format: {:?}", image_data.format),
-                //         };
-                //         let raw_image = RawImage2d::from_raw_rgba_reversed(&rgba_pixels, dims);
-                //         let texture =
-                //             glium::texture::SrgbTexture2d::new(&self.context, raw_image).unwrap();
-
-                //         println!(
-                //             "Loaded {} indices, {} vertices",
-                //             index_buffer.len(),
-                //             vertex_buffer.len()
-                //         );
-                //         meshes.push(MeshInstance {
-                //             vertex_buffer,
-                //             index_buffer,
-                //             texture,
-                //         });
-                //     }
-                // }
-
-                let aspect_ratio = 1920_f32 / 1047_f32;
-                let projection: [[f32; 4]; 4] =
-                    cgmath::perspective(cgmath::Deg(45.0), aspect_ratio, 0.1, 100.0).into();
-                let view: [[f32; 4]; 4] = cgmath::Matrix4::look_at_rh(
-                    cgmath::Point3::new(0.0, 0.0, 0.1),
-                    cgmath::Point3::new(0.0, 0.0, 0.0),
+                let aspect_ratio = 1920_f32 / 1080_f32;
+                let projection = cgmath::perspective(cgmath::Deg(45.0), aspect_ratio, 0.1, 100.0);
+                let eye = cgmath::Point3::new(0.0, 1.0, -2.5);
+                let view = cgmath::Matrix4::look_at_rh(
+                    eye,
+                    cgmath::Point3::new(0.0, 1.0, 0.0),
                     cgmath::Vector3::unit_y(),
-                )
-                .into();
-                let model: [[f32; 4]; 4] = cgmath::Matrix4::identity().into();
-                println!("Rendering frame with {} meshes", self.meshes.len());
+                );
+                let model = cgmath::Matrix4::identity();
 
-                let params = glium::DrawParameters {
-                    depth: glium::Depth {
-                        test: glium::DepthTest::IfLess,
-                        write: true,
-                        ..Default::default()
-                    },
-                    backface_culling: glium::BackfaceCullingMode::CullCounterClockwise,
-                    ..Default::default()
-                };
+                let model_view = view * model;
+                let mv3 = cgmath::Matrix3::new(
+                    model_view.x.x,
+                    model_view.x.y,
+                    model_view.x.z,
+                    model_view.y.x,
+                    model_view.y.y,
+                    model_view.y.z,
+                    model_view.z.x,
+                    model_view.z.y,
+                    model_view.z.z,
+                );
+                let normal_matrix: [[f32; 3]; 3] = mv3.invert().unwrap().transpose().into();
+
+                let light_dir: [f32; 3] = cgmath::Vector3::new(2.0, 1.0, -2.5).into();
+
+                let model_matrix: [[f32; 4]; 4] = model.into();
+                let view_matrix: [[f32; 4]; 4] = view.into();
+                let projection_matrix: [[f32; 4]; 4] = projection.into();
+                let camera_position: [f32; 3] = eye.into();
+
                 for mesh in &self.meshes {
-                    let uniforms = glium::uniform! { u_model: model, u_view: view, u_proj: projection, u_texture: &mesh.texture };
-                    println!(
-                        "Drawing {} indices, {} vertices",
-                        mesh.index_buffer.len(),
-                        mesh.vertex_buffer.len()
-                    );
+                    let image_data = &mesh.image_data;
+                    let dims = (image_data.width, image_data.height);
+                    // If not RGBA, convert to RGBA (just to be safe)
+                    let rgba_pixels = match image_data.format {
+                        gltf::image::Format::R8G8B8A8 => image_data.pixels.clone(),
+                        gltf::image::Format::R8G8B8 => {
+                            // Expand RGB to RGBA
+                            image_data
+                                .pixels
+                                .chunks(3)
+                                .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255]) // Add alpha = 255
+                                .collect()
+                        }
+                        _ => panic!("Unsupported pixel format: {:?}", image_data.format),
+                    };
+                    let raw_image = RawImage2d::from_raw_rgba(rgba_pixels, dims);
+                    let texture = glium::texture::Texture2d::new(&self.context, raw_image).unwrap();
+
+                    let uniforms = glium::uniform! { modelMatrix: model_matrix, viewMatrix: view_matrix, projectionMatrix: projection_matrix, normalMatrix: normal_matrix, cameraPosition: camera_position, utexture: texture, lightDir: light_dir };
 
                     frame
                         .draw(
@@ -298,7 +226,7 @@ pub mod glium_gl_area {
                             &mesh.index_buffer,
                             &self.program,
                             &uniforms,
-                            &params,
+                            &Default::default(),
                         )
                         .unwrap();
                 }
@@ -307,18 +235,18 @@ pub mod glium_gl_area {
         }
 
         #[derive(Default)]
-        pub struct GliumGLArea {
+        pub struct GliumGLAreaImp {
             vrm_model: RefCell<Option<VrmModel>>,
             frame_counter: Rc<Cell<u32>>,
         }
         #[glib::object_subclass]
-        impl ObjectSubclass for GliumGLArea {
+        impl ObjectSubclass for GliumGLAreaImp {
             const NAME: &'static str = "GliumGLArea";
             type Type = super::GliumGLArea;
             type ParentType = gtk::GLArea;
         }
-        impl ObjectImpl for GliumGLArea {}
-        impl WidgetImpl for GliumGLArea {
+        impl ObjectImpl for GliumGLAreaImp {}
+        impl WidgetImpl for GliumGLAreaImp {
             fn realize(&self) {
                 self.parent_realize();
 
@@ -331,6 +259,7 @@ pub mod glium_gl_area {
                     glium::backend::Context::new(widget.clone(), true, Default::default())
                 }
                 .unwrap();
+
                 *self.vrm_model.borrow_mut() = Some(VrmModel::new(context));
             }
 
@@ -340,9 +269,11 @@ pub mod glium_gl_area {
                 self.parent_unrealize();
             }
         }
-        impl GLAreaImpl for GliumGLArea {
+        impl GLAreaImpl for GliumGLAreaImp {
             fn render(&self, _context: &gdk::GLContext) -> glib::Propagation {
-                self.vrm_model.borrow().as_ref().unwrap().draw();
+                if let Some(model) = self.vrm_model.borrow().as_ref() {
+                    model.draw()
+                }
                 let count = self.frame_counter.get();
                 println!("Frame {count}");
                 self.frame_counter.set(count + 1);

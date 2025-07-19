@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::time::Duration;
 
 use gtk::gdk::Display;
@@ -9,7 +10,7 @@ use vrm_layer_mate::glium_gl_area::GliumGLArea;
 const APP_ID: &str = "org.gtk_rs.HelloWorld1";
 
 fn main() -> glib::ExitCode {
-     // Load GL pointers from epoxy (GL context management library used by GTK).
+    // Load GL pointers from epoxy (GL context management library used by GTK).
     {
         #[cfg(target_os = "macos")]
         let library = unsafe { libloading::os::unix::Library::new("libepoxy.0.dylib") }.unwrap();
@@ -74,9 +75,9 @@ fn build_ui(app: &Application) {
 
     window.present();
 
-    let frame_time = Duration::new(0, 1_000_000_000 / 2);
-    glib::source::timeout_add_local(frame_time, move || {
-        glarea.queue_draw();
-        glib::ControlFlow::Continue
-    });
+    // let frame_time = Duration::new(0, 1_000_000_000 / 144);
+    // glib::source::timeout_add_local(frame_time, move || {
+    //     glarea.queue_draw();
+    //     glib::ControlFlow::Continue
+    // });
 }
